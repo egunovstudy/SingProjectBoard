@@ -1,0 +1,32 @@
+{
+  "name": "singularity-board",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "yarn@1.22.22",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "playwright test",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src",
+    "test:unit": "node --experimental-strip-types tests/logic.test.ts"
+  },
+  "dependencies": {
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "reactflow": "11.10.2"
+  },
+  "devDependencies": {
+    "@types/react": "18.3.24",
+    "@types/react-dom": "18.3.7",
+    "typescript": "5.9.2",
+    "vite": "7.2.2",
+    "@playwright/test": "1.57.0",
+    "prettier": "2.3.2"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

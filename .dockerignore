@@ -1,0 +1,14 @@
+.env
+.env.*
+.git
+.agents
+.codex
+.aws
+target
+frontend/node_modules
+frontend/dist
+frontend/test-results
+frontend/playwright-report
+data
+backups
+*.log

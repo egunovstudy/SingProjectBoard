@@ -1,0 +1,23 @@
+server:
+  address: ${SERVER_ADDRESS:127.0.0.1}
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: never
+spring:
+  application:
+    name: singboard
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://127.0.0.1:5432/singboard}
+    username: ${DB_USER:singboard}
+    password: ${POSTGRES_PASSWORD:singboard-local}
+  liquibase:
+    change-log: classpath:db/changelog/master.xml
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
+app:
+  mode: ${APP_MODE:demo}
+  timezone: ${APP_TIMEZONE:Europe/Moscow}
+  token: ${SINGULARITY_API_TOKEN:}

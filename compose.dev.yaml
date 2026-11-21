@@ -1,0 +1,6 @@
+# Optional host access for running the Java backend outside Docker.
+# Usage: docker compose -f compose.yaml -f compose.dev.yaml up -d db
+services:
+  db:
+    ports:
+      - "127.0.0.1:15432:5432"
