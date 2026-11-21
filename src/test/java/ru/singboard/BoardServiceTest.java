@@ -614,6 +614,148 @@ class BoardServiceTest {
     }
 
     @Test
+    void reconciledChainCreationQueuesItsExistingStepsInOrderAcrossRestart() {
+        AtomicInteger posts = new AtomicInteger();
+        service = new BoardService(store, new DelegatingGateway(demo) {
+            @Override
+            public JsonNode createTask(JsonNode data) {
+                posts.incrementAndGet();
+                super.createTask(data);
+                throw new ApiFailure(0, true, "Тайм-аут");
+            }
+        });
+        ObjectNode request = Json.object().put("title", "Учебные материалы").put("requestId", UUID.randomUUID().toString());
+        request.putArray("stepIds").add("T-demo-1").add("T-demo-0");
+        String op = service.createChain(request);
+        assertThat(service.createChain(request)).isEqualTo(op);
+        assertThatThrownBy(() -> service.createChain(request.deepCopy().put("requestId", UUID.randomUUID().toString())))
+                .hasMessageContaining("уже есть операция цепочки");
+
+        service.processNext();
+        assertThat(Json.text(store.operation(op), "status")).isEqualTo("UNCERTAIN");
+        assertThat(store.operations()).hasSize(1);
+        service.resolve(op, Json.object().put("action", "reconcile"));
+        assertThat(Json.text(store.operation(op), "status")).isEqualTo("DONE");
+        String chain = store.operation(op).at("/detail/resultId").asText();
+
+        service = new BoardService(store, demo);
+        service.recover();
+        service.processNext();
+        service.processNext();
+        assertThat(stepIds(chain)).containsExactly("T-demo-1", "T-demo-0");
+        assertThat(service.createChain(request)).isEqualTo(op);
+        assertThat(store.operations()).hasSize(3);
+        assertThat(posts.get()).isEqualTo(1);
+        assertThat(demo.tasks()).hasSize(15);
+    }
+
+    @Test
+    void chainFromExistingTasksChecksTheirFreshLocationBeforeCreatingTheParent() {
+        ObjectNode request = Json.object().put("title", "Учебные материалы");
+        request.putArray("stepIds").add("T-demo-0").add("T-demo-1");
+        String op = service.createChain(request);
+        demo.patchTask("T-demo-1", Json.object().put("group", "Q-moved"));
+
+        service.processNext();
+
+        assertThat(Json.text(store.operation(op), "status")).isEqualTo("ERROR");
+        assertThat(store.operation(op).at("/detail/message").asText()).contains("в одном проекте и разделе");
+        assertThat(demo.tasks()).hasSize(14);
+        assertThat(demo.task("T-demo-0").has("parent")).isFalse();
+        assertThat(demo.task("T-demo-1").has("parent")).isFalse();
+    }
+
+    @Test
+    void rejectsTheOldChainRequestForTwoProjectlessTasksBeforeEnqueueing() throws Exception {
+        var first = demo.patchTask("T-demo-0", Json.object().put("projectId", ""));
+        var second = demo.patchTask("T-demo-1", Json.object().putNull("projectId"));
+        store.putEntity("entity_cache", "task", first);
+        store.putEntity("entity_cache", "task", second);
+        var mvc = MockMvcBuilders.standaloneSetup(new BoardController(service, jdbc))
+                .setControllerAdvice(new ApiErrors())
+                .addFilters(new LocalAccessFilter())
+                .build();
+
+        var response = mvc.perform(post("/api/chains").contentType("application/json").content("""
+                {"title":"Ремонт инструмента","stepIds":["T-demo-0","T-demo-1"]}
+                """))
+                .andExpect(status().isBadRequest()).andReturn().getResponse();
+
+        assertThat(Json.read(response.getContentAsString()).path("error").asText()).contains("Задачи без проекта");
+        assertThat(store.operations()).isEmpty();
+        assertThat(demo.tasks()).hasSize(14);
+    }
+
+    @Test
+    void projectlessChainAcceptsANewStepAndKeepsExistingTasksOutOfTheQueue() {
+        String chain = runOperation(service.createChain(Json.object().put("title", "Ремонт инструмента")));
+        String source = "T-demo-0";
+        JsonNode existing = demo.patchTask(source, Json.object().put("projectId", ""));
+        store.putEntity("entity_cache", "task", existing);
+
+        assertThatThrownBy(() -> service.moveChainStep(chain, source, position(existing, "")))
+                .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("Готовую задачу без проекта");
+        assertThat(store.operations()).hasSize(1);
+
+        String step = runOperation(service.createChainStep(chain, Json.object().put("title", "Отвезти инструмент").put("afterId", "")));
+        assertThat(stepIds(chain)).containsExactly(step);
+        assertThat(demo.task(source)).isEqualTo(existing);
+    }
+
+    @Test
+    void savesARejectedPairOnTheBoardAndClosesOnlyItsStepOperations() {
+        String source = "T-demo-0";
+        String target = "T-demo-1";
+        JsonNode originalSource = demo.task(source);
+        JsonNode originalTarget = demo.task(target);
+        JsonNode originalLayouts = store.layouts();
+        service = new BoardService(store, new DelegatingGateway(demo) {
+            @Override
+            public JsonNode patchTask(String id, JsonNode patch) {
+                if (patch.has("parent")) throw new ApiFailure(404, false, "Singularity: HTTP 404");
+                return super.patchTask(id, patch);
+            }
+        });
+        ObjectNode request = Json.object().put("title", "Учебные материалы");
+        request.putArray("stepIds").add(source).add(target);
+        String chain = runOperation(service.createChain(request));
+        String first = Json.text(store.operations().get(1), "id");
+        String second = Json.text(store.operations().get(2), "id");
+        String other = service.tag("T-demo-3", "A-project-0", true);
+
+        service.processNext();
+        assertThat(service.board().at("/operations/1/canLinkOnBoard").asBoolean()).isTrue();
+        assertThat(Json.text(store.operation(first), "status")).isEqualTo("ERROR");
+        assertThat(Json.text(store.operation(second), "status")).isEqualTo("PENDING");
+
+        String deletion = service.deleteTask(target);
+        ObjectNode resolution = Json.object().put("action", "link-on-board");
+        assertThatThrownBy(() -> service.resolve(first, resolution)).hasMessageContaining("ожидающее удаление");
+        assertThatThrownBy(() -> service.linkTasks(source, target)).hasMessageContaining("ожидающее удаление");
+        assertThat(store.taskLinks()).isEmpty();
+        assertThat(Json.text(store.operation(first), "status")).isEqualTo("ERROR");
+        assertThat(Json.text(store.operation(second), "status")).isEqualTo("PENDING");
+        assertThat(Json.text(store.operation(deletion), "status")).isEqualTo("PENDING");
+
+        service.resolve(deletion, Json.object().put("action", "discard"));
+        service.resolve(first, resolution);
+        service.resolve(first, resolution);
+        service.linkTasks(source, target);
+        assertThat(service.board().path("taskLinks")).containsExactly(Json.object().put("source", source).put("target", target));
+        assertThat(Json.text(store.operation(first), "status")).isEqualTo("CANCELLED");
+        assertThat(Json.text(store.operation(second), "status")).isEqualTo("CANCELLED");
+        assertThat(Json.text(store.operation(deletion), "status")).isEqualTo("CANCELLED");
+        assertThat(Json.text(store.operation(other), "status")).isEqualTo("PENDING");
+        assertThat(demo.task(source)).isEqualTo(originalSource);
+        assertThat(demo.task(target)).isEqualTo(originalTarget);
+        assertThat(stepIds(chain)).isEmpty();
+        assertThat(store.layouts()).isEqualTo(originalLayouts);
+
+        service.unlinkTasks(source, target);
+        assertThat(service.board().path("taskLinks").isEmpty()).isTrue();
+    }
+
+    @Test
     void usesFreshSiblingOrderAndSpreadsTiedRanksWithoutChangingTheirRelativeOrder() {
         String chain = runOperation(service.createChain(Json.object().put("title", "Гитара")));
         String first = runOperation(service.createChainStep(chain, Json.object().put("title", "Примерить").put("afterId", "")));

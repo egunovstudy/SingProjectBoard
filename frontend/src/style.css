@@ -1659,6 +1659,11 @@ input[type="checkbox"] {
   visibility: hidden;
   pointer-events: none;
 }
+.task-card .chain-handle {
+  width: 12px;
+  height: 12px;
+  background: #386fc3;
+}
 .task-card.chain-next-card {
   box-shadow: 0 0 0 2px #386fc3, 0 3px 12px #386fc320;
 }
@@ -1691,6 +1696,11 @@ input[type="checkbox"] {
   display: grid;
   gap: 9px;
   flex-shrink: 0;
+}
+.initial-chain-steps {
+  margin: 0;
+  padding-inline-start: 24px;
+  overflow-wrap: anywhere;
 }
 .relations-form label {
   display: grid;

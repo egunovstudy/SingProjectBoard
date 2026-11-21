@@ -1,12 +1,12 @@
 import React, { useEffect, useRef, useState } from "react";
 import { isPlaced } from "./boardModel";
 import type { BoardTask } from "./boardModel";
-import { canPositionStep } from "./chains";
+import { canPositionStep, moveChainStep } from "./chains";
 import type { TaskChain } from "./chains";
 import { availableTag } from "./scenarios";
-import { api } from "./types";
+import { api, taskLinkPath } from "./types";
 import type { Board } from "./types";
-import { icon, statusNames } from "./ui";
+import { icon, kindNames, statusNames } from "./ui";
 
 type RequestKeys = {
   requestId: (key: string) => string;
@@ -30,6 +30,8 @@ function PanelHeading({ title, close }: { title: string; close: () => void }) {
 
 export function CreateChainPanel({
   board,
+  stepIds,
+  configureMarker,
   close,
   created,
   refresh,
@@ -37,6 +39,8 @@ export function CreateChainPanel({
   clearRequest,
 }: RequestKeys & {
   board: Board;
+  stepIds?: readonly [string, string];
+  configureMarker?: () => void;
   close: () => void;
   created: (id: string) => void;
   refresh: () => Promise<void>;
@@ -65,22 +69,13 @@ export function CreateChainPanel({
       created(resultId);
   }, [resultId, board.tasks, created]);
 
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    const name = title.trim();
-    if (!name || waiting || busy.current) return;
-    const key = JSON.stringify(["chain", projectId, name]);
+  async function save(action: () => Promise<void>) {
+    if (waiting || busy.current) return;
     busy.current = true;
     setSending(true);
     setError("");
     try {
-      const response = await api("/chains", "POST", {
-        title: name,
-        projectId,
-        requestId: requestId(key),
-      });
-      clearRequest(key);
-      setOperationId(response.operationId);
+      await action();
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -90,10 +85,54 @@ export function CreateChainPanel({
     }
   }
 
+  function submit(e: React.FormEvent) {
+    e.preventDefault();
+    const name = title.trim();
+    if (!name || configureMarker) return;
+    const key = JSON.stringify(["chain", stepIds ?? projectId, name]);
+    void save(async () => {
+      const response = await api("/chains", "POST", {
+        title: name,
+        ...(stepIds ? { stepIds } : { projectId }),
+        requestId: requestId(key),
+      });
+      clearRequest(key);
+      setOperationId(response.operationId);
+    });
+  }
+
   return (
     <section className="task-tray relations-panel" aria-label="Новая цепочка">
       <PanelHeading title="Новая цепочка" close={close} />
-      <form className="relations-form" onSubmit={(e) => void submit(e)}>
+      <form className="relations-form" onSubmit={submit}>
+        {stepIds && (
+          <>
+            <ol className="initial-chain-steps">
+              {stepIds.map((id) => (
+                <li key={id}>
+                  {board.tasks.find((task) => task.id === id)?.title ||
+                    "Задача недоступна"}
+                </li>
+              ))}
+            </ol>
+            <button
+              type="button"
+              className="outline-button"
+              disabled={waiting}
+              onClick={() =>
+                void save(async () => {
+                  await api(taskLinkPath(...stepIds), "PUT");
+                  close();
+                })
+              }
+            >
+              Связать только на доске
+            </button>
+            <div className="field-help">
+              Создание цепочки сделает эти задачи подзадачами в Singularity.
+            </div>
+          </>
+        )}
         <label>
           Название цепочки
           <input
@@ -103,27 +142,38 @@ export function CreateChainPanel({
             onChange={(e) => setTitle(e.target.value)}
           />
         </label>
-        <label>
-          Проект Singularity
-          <select
-            value={projectId}
-            disabled={waiting}
-            onChange={(e) => setProjectId(e.target.value)}
+        {!stepIds && (
+          <label>
+            Проект Singularity
+            <select
+              value={projectId}
+              disabled={waiting}
+              onChange={(e) => setProjectId(e.target.value)}
+            >
+              <option value="">Без проекта</option>
+              {projects.map((tag) => (
+                <option key={tag.id} value={tag.id}>
+                  {tag.title}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        {configureMarker && (
+          <button
+            type="button"
+            className="outline-button"
+            onClick={configureMarker}
           >
-            <option value="">Без проекта</option>
-            {projects.map((tag) => (
-              <option key={tag.id} value={tag.id}>
-                {tag.title}
-              </option>
-            ))}
-          </select>
-        </label>
+            Выбрать тег цепочек
+          </button>
+        )}
         <button
           type="submit"
           className="primary"
-          disabled={waiting || !title.trim()}
+          disabled={waiting || !title.trim() || !!configureMarker}
         >
-          Создать цепочку
+          {stepIds ? "Создать цепочку в Singularity" : "Создать цепочку"}
         </button>
         {error && (
           <div className="inline-error" role="alert">
@@ -146,6 +196,8 @@ export function ChainPanel({
   tasks,
   close,
   select,
+  openOperations,
+  linkOnBoard,
   showOnBoard,
   refresh,
   requestId,
@@ -156,12 +208,16 @@ export function ChainPanel({
   tasks: BoardTask[];
   close: () => void;
   select: (id: string) => void;
+  openOperations: () => void;
+  linkOnBoard: (operationId: string) => void;
   showOnBoard: (task: BoardTask) => void;
   refresh: () => Promise<void>;
 }) {
   const [title, setTitle] = useState("");
   const [existing, setExisting] = useState("");
-  const [source, setSource] = useState("new");
+  const [stepSource, setStepSource] = useState("new");
+  const hasProject = !!chain.parent.projectId;
+  const source = hasProject ? stepSource : "new";
   const [anchor, setAnchor] = useState<string>();
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState("");
@@ -209,13 +265,7 @@ export function ChainPanel({
   }
 
   const position = (step: BoardTask, afterId: string) =>
-    api(`${stepsPath}/${encodeURIComponent(step.id)}`, "PATCH", {
-      afterId,
-      base: {
-        parent: step.parent ?? null,
-        parentOrder: step.parentOrder ?? null,
-      },
-    });
+    moveChainStep(chain.parent.id, step, afterId);
   const candidate = candidates.find((task) => task.id === existing);
   function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -331,13 +381,18 @@ export function ChainPanel({
       </ol>
       {chain.steps.length === 0 && <p>Добавьте первый шаг.</p>}
       <form className="relations-form" onSubmit={submit}>
-        <label>
-          Добавить шаг
-          <select value={source} onChange={(e) => setSource(e.target.value)}>
-            <option value="new">Новая задача</option>
-            <option value="existing">Существующая задача</option>
-          </select>
-        </label>
+        {hasProject && (
+          <label>
+            Добавить шаг
+            <select
+              value={source}
+              onChange={(e) => setStepSource(e.target.value)}
+            >
+              <option value="new">Новая задача</option>
+              <option value="existing">Существующая задача</option>
+            </select>
+          </label>
+        )}
         {source === "existing" ? (
           <label>
             Задача из того же проекта и раздела
@@ -400,13 +455,34 @@ export function ChainPanel({
         {locked && (
           <div role="status" className="field-help">
             {operation
-              ? statusNames[operation.status] +
+              ? (kindNames[operation.kind] || operation.kind) +
+                " · " +
+                statusNames[operation.status] +
                 (operation.detail.message
                   ? " · " + operation.detail.message
                   : "")
               : "Изменение в очереди"}
           </div>
         )}
+        {operation?.canLinkOnBoard && (
+          <button
+            type="button"
+            className="outline-button"
+            onClick={() => linkOnBoard(operation.id)}
+          >
+            Связать только на доске
+          </button>
+        )}
+        {operation &&
+          ["ERROR", "CONFLICT", "UNCERTAIN"].includes(operation.status) && (
+            <button
+              type="button"
+              className="outline-button"
+              onClick={openOperations}
+            >
+              Открыть операции
+            </button>
+          )}
       </form>
     </section>
   );

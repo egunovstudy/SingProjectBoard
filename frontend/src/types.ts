@@ -61,6 +61,11 @@ export interface Operation {
   detail: Raw;
   payload: Raw;
   createdAt: number;
+  canLinkOnBoard?: boolean;
+}
+export interface TaskLink {
+  source: string;
+  target: string;
 }
 export interface Board {
   mode: "demo" | "real";
@@ -70,6 +75,7 @@ export interface Board {
   projects: Scenario[];
   nativeProjects: Tag[];
   layouts: Record<string, Layout>;
+  taskLinks: TaskLink[];
   operations: Operation[];
   sync: { running: boolean; lastSuccess: number; error: string };
 }
@@ -111,6 +117,11 @@ export function simpleNote(note: string | undefined): boolean {
   } catch {
     return false;
   }
+}
+export function taskLinkPath(source: string, target: string) {
+  return `/task-links/${encodeURIComponent(source)}/${encodeURIComponent(
+    target
+  )}`;
 }
 export async function api<T = any>(
   path: string,

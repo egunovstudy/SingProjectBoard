@@ -16,6 +16,10 @@ public class BoardController {
     @PostMapping("/sync") public ObjectNode sync() { return service.sync(); }
     @PatchMapping("/settings") public ObjectNode settings(@RequestBody JsonNode data) { return service.settings(data); }
     @PutMapping("/layouts/{id}") public void layout(@PathVariable String id, @RequestBody JsonNode data) { service.layout(id, data); }
+    @PutMapping("/task-links/{source}/{target}")
+    public void linkTasks(@PathVariable String source, @PathVariable String target) { service.linkTasks(source, target); }
+    @DeleteMapping("/task-links/{source}/{target}")
+    public void unlinkTasks(@PathVariable String source, @PathVariable String target) { service.unlinkTasks(source, target); }
     @PostMapping("/tasks") public ObjectNode create(@RequestBody JsonNode data) { return queued(service.createTask(data)); }
     @PatchMapping("/tasks/{id}") public ObjectNode patch(@PathVariable String id, @RequestBody JsonNode data) { return queued(service.updateTask(id, data)); }
     @DeleteMapping("/tasks/{id}")

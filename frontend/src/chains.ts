@@ -1,4 +1,4 @@
-import { readOnly, recurring } from "./types.ts";
+import { api, readOnly, recurring } from "./types.ts";
 import type { Task } from "./types.ts";
 import type { BoardTask } from "./boardModel.ts";
 
@@ -50,13 +50,41 @@ export function canPositionStep(
   marker: string
 ) {
   return (
-    ordinaryTask(task) &&
-    !readOnly(task) &&
+    canLinkChainStep(task, marker) &&
     task.id !== chain.parent.id &&
     (task.parent
       ? task.parent === chain.parent.id
-      : !task.tags?.includes(marker) &&
-        (task.projectId || "") === (chain.parent.projectId || "") &&
-        (task.group || "") === (chain.parent.group || ""))
+      : !!chain.parent.projectId && sameTaskLocation(task, chain.parent))
+  );
+}
+
+export function canLinkChainStep(task: Task, marker: string) {
+  return (
+    ordinaryTask(task) &&
+    !readOnly(task) &&
+    (!!task.parent || !task.tags?.includes(marker))
+  );
+}
+
+export function sameTaskLocation(a: Task, b: Task) {
+  return (
+    (a.projectId || "") === (b.projectId || "") &&
+    (a.group || "") === (b.group || "")
+  );
+}
+
+export function moveChainStep(chainId: string, step: Task, afterId: string) {
+  return api<{ operationId: string }>(
+    `/chains/${encodeURIComponent(chainId)}/steps/${encodeURIComponent(
+      step.id
+    )}`,
+    "PATCH",
+    {
+      afterId,
+      base: {
+        parent: step.parent ?? null,
+        parentOrder: step.parentOrder ?? null,
+      },
+    }
   );
 }

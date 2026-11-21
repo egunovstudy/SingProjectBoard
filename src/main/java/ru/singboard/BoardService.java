@@ -81,7 +81,12 @@ public class BoardService {
         board.set("projects", projects);
         board.set("nativeProjects", Json.MAPPER.valueToTree(store.cache("project")));
         board.set("layouts", store.layouts());
-        board.set("operations", Json.MAPPER.valueToTree(store.operations()));
+        board.set("taskLinks", store.taskLinks());
+        List<ObjectNode> operations = store.operations();
+        operations.forEach(op -> {
+            if (waitingSecondStep(op, operations).isPresent()) op.put("canLinkOnBoard", true);
+        });
+        board.set("operations", Json.MAPPER.valueToTree(operations));
         board.set("sync", syncStatus());
         return board;
     }
@@ -205,6 +210,22 @@ public class BoardService {
         return store.enqueue(requestId, "CREATE_TASK", "", payload);
     }
 
+    public synchronized void linkTasks(String source, String target) {
+        if (source.equals(target)) throw new IllegalArgumentException("Выберите две разные задачи");
+        if (store.operations().stream().anyMatch(op -> isOpenTaskDeletion(op)
+                && (source.equals(Json.text(op, "entityId")) || target.equals(Json.text(op, "entityId")))))
+            throw new IllegalArgumentException("Сначала отмените ожидающее удаление задачи в операциях синхронизации");
+        for (String id : List.of(source, target)) {
+            if (!ChainOrder.ordinaryTask(chains.cachedTask(id)))
+                throw new IllegalArgumentException("Для связи выберите доступные разовые задачи");
+        }
+        store.linkTasks(source, target);
+    }
+
+    public synchronized void unlinkTasks(String source, String target) {
+        store.unlinkTasks(source, target);
+    }
+
     private boolean isActiveTaskScenario(String id) {
         for (JsonNode scenario : ScenarioCatalog.scenarios(store.settings(), store.cache("tag"))) {
             if (id.equals(Json.text(scenario, "id")) && Json.available(scenario))
@@ -221,8 +242,9 @@ public class BoardService {
 
     public String createChain(JsonNode request) {
         String requestId = requestId(request);
-        String marker = chains.marker();
         ObjectNode data = newTask(request, requestId);
+        if (request.has("stepIds")) return createChainFromSteps(requestId, data, request.path("stepIds"));
+        String marker = chains.marker();
         data.set("tags", Json.array().add(marker));
         String project = Json.text(request, "projectId");
         if (!project.isBlank()) {
@@ -231,6 +253,46 @@ public class BoardService {
             data.put("projectId", project);
         }
         return store.enqueue(requestId, "CREATE_TASK", "", Json.object().put("chainMarker", marker).set("data", data));
+    }
+
+    private synchronized String createChainFromSteps(String requestId, ObjectNode data, JsonNode stepIds) {
+        if (!stepIds.isArray() || stepIds.size() != 2
+                || stepIds.valueStream().anyMatch(id -> !id.isTextual() || id.asText().isBlank())
+                || stepIds.get(0).equals(stepIds.get(1)))
+            throw new IllegalArgumentException("Выберите две разные задачи для цепочки");
+        List<ObjectNode> operations = store.operations();
+        for (ObjectNode operation : operations) {
+            if (!requestId.equals(Json.text(operation, "id"))) continue;
+            JsonNode payload = operation.path("payload");
+            if (!"CREATE_TASK".equals(Json.text(operation, "kind")) || !stepIds.equals(payload.path("stepIds"))
+                    || !data.path("title").equals(payload.path("data").path("title")))
+                throw new IllegalArgumentException("Этот идентификатор запроса уже использован для другого изменения");
+            return requestId;
+        }
+
+        Set<String> ids = Set.of(stepIds.get(0).asText(), stepIds.get(1).asText());
+        for (ObjectNode operation : operations) {
+            if (Set.of("DONE", "CANCELLED").contains(Json.text(operation, "status"))) continue;
+            if (operation.path("payload").path("stepIds").valueStream().anyMatch(id -> ids.contains(id.asText()))
+                    || ("MOVE_STEP".equals(Json.text(operation, "kind")) && ids.contains(Json.text(operation, "entityId"))))
+                throw new IllegalArgumentException("Для одной из задач уже есть операция цепочки. Проверьте очередь синхронизации");
+        }
+
+        List<JsonNode> tasks = stepIds.valueStream().map(id -> chains.cachedTask(id.asText())).toList();
+        if (tasks.stream().noneMatch(task -> Json.hasText(task, "projectId")))
+            throw new IllegalArgumentException("Задачи без проекта соединяются на доске. Обновите вкладку и перетащите связь между карточками");
+        String marker = chains.marker();
+        ChainTasks.copyLocation(tasks.getFirst(), data);
+        data.set("tags", Json.array().add(marker));
+        ObjectNode payload = Json.object().put("chainMarker", marker);
+        payload.set("stepIds", stepIds);
+        payload.set("data", data);
+        ObjectNode bases = payload.putObject("stepBases");
+        for (JsonNode task : tasks) {
+            ChainTasks.validateMove(data, task, marker);
+            bases.putObject(Json.text(task, "id")).putNull("parent").set("parentOrder", task.get("parentOrder"));
+        }
+        return store.enqueue(requestId, "CREATE_TASK", "", payload);
     }
 
     public String createChainStep(String id, JsonNode request) {
@@ -250,7 +312,12 @@ public class BoardService {
         if (!(base.path("parent").isTextual() || base.path("parent").isNull())
                 || !(base.path("parentOrder").isNumber() || base.path("parentOrder").isNull()))
             throw new IllegalArgumentException("Нужны исходные родитель и позиция шага");
-        return store.enqueue("MOVE_STEP", taskId, Json.object().put("chainId", id).put("afterId", after).set("base", base));
+        return enqueueStepMove(id, taskId, after, base);
+    }
+
+    private String enqueueStepMove(String chainId, String taskId, String afterId, JsonNode base) {
+        return store.enqueue("MOVE_STEP", taskId,
+                Json.object().put("chainId", chainId).put("afterId", afterId).set("base", base));
     }
 
     private static String afterStep(JsonNode request) {
@@ -303,13 +370,17 @@ public class BoardService {
 
     public synchronized String deleteTask(String id) {
         for (ObjectNode op : store.operations()) {
-            if (id.equals(Json.text(op, "entityId")) && "DELETE_TASK".equals(Json.text(op, "kind"))
-                    && !Set.of("DONE", "CANCELLED").contains(Json.text(op, "status")))
+            if (id.equals(Json.text(op, "entityId")) && isOpenTaskDeletion(op))
                 return Json.text(op, "id");
         }
         JsonNode task = store.entity("entity_cache", "task", id);
         requireEditable(task);
         return store.enqueue("DELETE_TASK", id, Json.object().put("title", Json.text(task, "title")));
+    }
+
+    private static boolean isOpenTaskDeletion(ObjectNode op) {
+        return "DELETE_TASK".equals(Json.text(op, "kind"))
+                && !Set.of("DONE", "CANCELLED").contains(Json.text(op, "status"));
     }
 
     public String updateTask(String id, JsonNode request) {
@@ -407,9 +478,11 @@ public class BoardService {
             if (Set.of("DONE", "CANCELLED").contains(status)) continue;
             String entity = Json.text(op, "entityId");
             String lock = entity.isBlank() ? Json.text(op, "id") : entity;
-            String chain = Json.text(op.path("payload"), "chainId");
+            JsonNode payload = op.path("payload");
+            String chain = Json.text(payload, "chainId");
             boolean available = blocked.add(lock);
             if (!chain.isBlank()) available = blocked.add(chain) && available;
+            for (JsonNode step : payload.path("stepIds")) available = blocked.add(step.asText()) && available;
             if (!available) continue;
             if (!status.equals("PENDING") || op.path("nextAttempt").asLong() > System.currentTimeMillis()) continue;
             execute(op);
@@ -429,6 +502,7 @@ public class BoardService {
                 sendTaskDeletion(id);
                 store.transaction(() -> {
                     store.deleteEntity("entity_cache", "task", id);
+                    store.removeTaskLinks(id);
                     state(op, "DONE", Json.object().put("message", "Задача удалена").put("resultId", id), attempts, 0);
                 });
                 return;
@@ -438,9 +512,17 @@ public class BoardService {
                 ObjectNode data = Json.copy(payload.path("data"));
                 String chainId = Json.text(payload, "chainId");
                 if (!chainId.isBlank()) prepareChainStep(data, chainId, Json.text(payload, "afterId"));
-                if (payload.has("chainMarker") && !chains.freshMarker().equals(Json.text(payload, "chainMarker")))
-                    throw new IllegalArgumentException("Тег цепочек изменился. Создайте цепочку с выбранным тегом");
-                if (kind.equals("CREATE_TASK") && !payload.has("chainMarker")) {
+                if (payload.has("chainMarker")) {
+                    String marker = chains.freshMarker();
+                    if (!marker.equals(Json.text(payload, "chainMarker")))
+                        throw new IllegalArgumentException("Тег цепочек изменился. Создайте цепочку с выбранным тегом");
+                    for (JsonNode stepId : payload.path("stepIds")) {
+                        JsonNode step = gateway.task(stepId.asText());
+                        if (!stepId.asText().equals(Json.text(step, "id")))
+                            throw new ApiFailure(0, false, "Singularity вернул другую задачу. Обновите доску перед созданием цепочки");
+                        ChainTasks.validateMove(data, step, marker);
+                    }
+                } else if (kind.equals("CREATE_TASK")) {
                     for (String tagId : tagSet(data.path("tags"))) requireActiveTag(tagId);
                 }
                 creating = true;
@@ -458,6 +540,8 @@ public class BoardService {
                 if (payload.has("layout")) layout(createdId, payload.path("layout"));
                 if (kind.equals("CREATE_TASK") && !creationTagsMatch(result, data))
                     throw new ApiFailure(0, false, "Задача создана. Проверьте её теги в Singularity");
+                if (payload.has("stepIds") && !validNewChainLocation(result, data))
+                    throw new ApiFailure(0, false, "Цепочка создана в другом разделе. Проверьте её расположение в Singularity");
             } else {
                 result = switch (kind) {
                     case "MOVE_SCENARIO" -> sendScenarioMove(op, id, payload, attempts);
@@ -467,7 +551,7 @@ public class BoardService {
                 };
                 if (result == null) return; // Conflict recorded by the operation handler.
             }
-            state(op, "DONE", Json.object().put("message", "Сохранено").put("resultId", Json.text(result, "id")), attempts, 0);
+            finishOperation(op, result, attempts, "Сохранено");
         } catch (Exception e) {
             boolean ambiguous = creating && (!createdId.isBlank() || !(e instanceof ApiFailure f) || f.status == 0 || f.status >= 500);
             boolean retry = !creating && e instanceof ApiFailure f && f.retryable && attempts < 3;
@@ -476,6 +560,25 @@ public class BoardService {
             if (!createdId.isBlank()) detail.put("resultId", createdId);
             state(op, ambiguous ? "UNCERTAIN" : retry ? "PENDING" : "ERROR", detail, attempts, System.currentTimeMillis() + delay);
         }
+    }
+
+    private void finishOperation(ObjectNode op, JsonNode result, int attempts, String message) {
+        String id = Json.text(result, "id");
+        ObjectNode detail = Json.object().put("message", message).put("resultId", id);
+        JsonNode payload = op.path("payload");
+        if (!payload.has("stepIds")) {
+            state(op, "DONE", detail, attempts, 0);
+            return;
+        }
+        store.transaction(() -> {
+            String afterId = "";
+            for (JsonNode step : payload.path("stepIds")) {
+                String taskId = step.asText();
+                enqueueStepMove(id, taskId, afterId, payload.path("stepBases").path(taskId));
+                afterId = taskId;
+            }
+            state(op, "DONE", detail, attempts, 0);
+        });
     }
 
     private void sendTaskDeletion(String id) {
@@ -496,9 +599,7 @@ public class BoardService {
         JsonNode parent = chains.freshChain(chainId);
         double order = chains.placementOrder(chainId, chains.steps(chainId), "", afterId);
         data.put("parent", chainId).put("parentOrder", order);
-        for (String key : List.of("projectId", "group")) {
-            if (Json.hasText(parent, key)) data.set(key, parent.path(key));
-        }
+        ChainTasks.copyLocation(parent, data);
     }
 
     private JsonNode sendScenarioMove(ObjectNode op, String id, JsonNode payload, int attempts) {
@@ -631,6 +732,10 @@ public class BoardService {
         ObjectNode op = store.operation(operationId);
         String action = Json.text(request, "action");
         String status = Json.text(op, "status");
+        if (action.equals("link-on-board")) {
+            linkFailedChainOnBoard(op);
+            return;
+        }
         if (Set.of("DONE", "CANCELLED", "SENDING").contains(status)) throw new IllegalArgumentException("Операция уже завершена или отправляется");
         if (action.equals("discard")) {
             state(op, "CANCELLED", Json.object().put("message", "Отменено пользователем; внешний результат не удалён"), op.path("attempts").asInt(), 0);
@@ -651,7 +756,7 @@ public class BoardService {
                         op.path("attempts").asInt(), 0);
                 return;
             }
-            state(op, "DONE", Json.object().put("resultId", Json.text(task, "id")).put("message", "Найдена созданная задача"), op.path("attempts").asInt(), 0);
+            finishOperation(op, task, op.path("attempts").asInt(), "Найдена созданная задача");
         } else if (Json.text(op, "kind").startsWith("CREATE_")) {
             throw new IllegalArgumentException("Повторное создание отключено. Сверьте результат или отмените операцию после ручной проверки");
         } else if (action.equals("ours") && status.equals("CONFLICT")) {
@@ -671,12 +776,46 @@ public class BoardService {
         } else throw new IllegalArgumentException("Недопустимое действие для этого состояния");
     }
 
+    private void linkFailedChainOnBoard(ObjectNode first) {
+        if (first.path("detail").path("linkedOnBoard").asBoolean()) return;
+        ObjectNode second = waitingSecondStep(first, store.operations()).orElseThrow(() ->
+                new IllegalArgumentException("Состояние шагов цепочки изменилось. Обновите список операций"));
+        store.transaction(() -> {
+            linkTasks(Json.text(first, "entityId"), Json.text(second, "entityId"));
+            ObjectNode detail = Json.object().put("message", "Связь сохранена на доске").put("linkedOnBoard", true);
+            state(first, "CANCELLED", detail, first.path("attempts").asInt(), 0);
+            state(second, "CANCELLED", detail, second.path("attempts").asInt(), 0);
+        });
+    }
+
+    private static Optional<ObjectNode> waitingSecondStep(ObjectNode first, List<ObjectNode> operations) {
+        String chainId = first.at("/payload/chainId").asText("");
+        if (!"MOVE_STEP".equals(Json.text(first, "kind")) || !"ERROR".equals(Json.text(first, "status"))
+                || chainId.isBlank() || !first.at("/payload/afterId").asText().isEmpty()) return Optional.empty();
+        String source = Json.text(first, "entityId");
+        String target = operations.stream()
+                .filter(op -> "CREATE_TASK".equals(Json.text(op, "kind")) && "DONE".equals(Json.text(op, "status"))
+                        && chainId.equals(op.at("/detail/resultId").asText()))
+                .map(op -> op.at("/payload/stepIds"))
+                .filter(steps -> steps.isArray() && steps.size() == 2 && source.equals(steps.path(0).asText()))
+                .map(steps -> steps.path(1).asText())
+                .findFirst().orElse("");
+        if (target.isBlank()) return Optional.empty();
+        return operations.stream().dropWhile(op -> !op.path("id").equals(first.path("id"))).skip(1)
+                .filter(op -> "MOVE_STEP".equals(Json.text(op, "kind")) && chainId.equals(op.at("/payload/chainId").asText()))
+                .findFirst()
+                .filter(op -> "PENDING".equals(Json.text(op, "status")) && op.path("attempts").asInt() == 0
+                        && target.equals(Json.text(op, "entityId")) && source.equals(op.at("/payload/afterId").asText()));
+    }
+
     private static boolean creationTagsMatch(JsonNode task, JsonNode data) {
         return tagSet(task.path("tags")).containsAll(tagSet(data.path("tags")));
     }
 
     private boolean creationMatches(JsonNode task, JsonNode payload) {
-        if (!creationTagsMatch(task, payload.path("data"))) return false;
+        JsonNode data = payload.path("data");
+        if (!creationTagsMatch(task, data)) return false;
+        if (payload.has("stepIds")) return validNewChainLocation(task, data);
         String chainId = Json.text(payload, "chainId");
         if (chainId.isEmpty()) return true;
         if (!chainId.equals(Json.text(task, "parent"))) return false;
@@ -684,5 +823,9 @@ public class BoardService {
         List<JsonNode> steps = chains.steps(chainId);
         if (!afterId.isEmpty() && steps.stream().noneMatch(step -> afterId.equals(Json.text(step, "id")))) return false;
         return ChainTasks.immediatelyAfter(steps, Json.text(task, "id"), afterId);
+    }
+
+    private static boolean validNewChainLocation(JsonNode task, JsonNode data) {
+        return !Json.hasText(task, "parent") && ChainTasks.sameLocation(task, data);
     }
 }

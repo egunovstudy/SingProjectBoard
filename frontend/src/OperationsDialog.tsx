@@ -117,6 +117,14 @@ export default function OperationsDialog({
                   Повторить
                 </button>
               )}
+              {op.canLinkOnBoard && (
+                <button
+                  className="outline-button"
+                  onClick={() => resolve(op.id, "link-on-board")}
+                >
+                  Связать только на доске
+                </button>
+              )}
               {op.status === "UNCERTAIN" && op.kind === "CREATE_TASK" && (
                 <button
                   className="outline-button"

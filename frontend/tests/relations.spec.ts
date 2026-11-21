@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import type { APIRequestContext } from "@playwright/test";
+import type { APIRequestContext, Page } from "@playwright/test";
 
 async function resultId(request: APIRequestContext, operationId: string) {
   let id = "";
@@ -14,6 +14,25 @@ async function resultId(request: APIRequestContext, operationId: string) {
     })
     .toBe("DONE");
   return id;
+}
+
+async function connectCards(page: Page, from: string, to: string) {
+  const output = page
+    .getByTestId(`task-${from}`)
+    .locator('[data-handleid="task"]');
+  const input = page
+    .getByTestId(`task-${to}`)
+    .getByLabel("Соединить с предыдущей задачей");
+  await expect(output).toBeVisible();
+  await expect(input).toBeVisible();
+  const start = (await output.boundingBox())!;
+  const end = (await input.boundingBox())!;
+  await page.mouse.move(start.x + start.width / 2, start.y + start.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(end.x + end.width / 2, end.y + end.height / 2, {
+    steps: 12,
+  });
+  await page.mouse.up();
 }
 
 test("дерево переезда читается из Singularity и редактируется на доске", async ({
@@ -190,4 +209,174 @@ test("цепочку можно создать на доске и переста
   await page.getByRole("button", { name: "Показать всё ↗", exact: true }).click();
   await expect(panel).toHaveCount(0);
   await expect(page.locator(".flow-surface .dimmed")).toHaveCount(0);
+});
+
+test("перетаскивание между карточками связывает существующие задачи в цепочку", async ({
+  page,
+  request,
+}) => {
+  const first = "Подготовить список учебных материалов";
+  const second = "Вынести материалы в Obsidian";
+  const third = "Выбрать материал для начала";
+  async function place(title: string, x: number) {
+    const fields = {
+      title,
+      projectId: "P-demo",
+      group: "Q-study",
+      tags: ["A-ordinary"],
+    };
+    const response = await request.post("/api/demo/external/tasks", {
+      data: fields,
+    });
+    expect(response.ok()).toBe(true);
+    const { id } = await response.json();
+    const layout = { x, y: 24, width: 250, height: 100 };
+    await request.put(`/api/layouts/${id}`, { data: layout });
+    return { id, fields, layout };
+  }
+  const [a, b, c] = await Promise.all([
+    place(first, 200),
+    place(second, 530),
+    place(third, 860),
+  ]);
+  await request.patch("/api/settings", {
+    data: { chainTagId: "", viewport: { x: 130, y: 160, zoom: 0.8 } },
+  });
+  await expect
+    .poll(async () => {
+      await request.post("/api/sync", { data: {} });
+      const board = await (await request.get("/api/board")).json();
+      return [a, b, c].every(({ id }) =>
+        board.tasks.some((task: any) => task.id === id)
+      );
+    })
+    .toBe(true);
+  await page.goto("/");
+
+  await connectCards(page, a.id, b.id);
+  const form = page.getByRole("region", { name: "Новая цепочка" });
+  await expect(form.getByRole("listitem")).toHaveText([first, second]);
+  await form.getByRole("button", { name: "Связать только на доске" }).click();
+  const boardArrow = page.getByLabel(`${first} → ${second} (на доске)`, {
+    exact: true,
+  });
+  await expect(boardArrow).toHaveCount(1);
+  await page.reload();
+  await expect(boardArrow).toHaveCount(1);
+  await boardArrow.dispatchEvent("click");
+  await page.getByRole("button", { name: "Убрать связь" }).click();
+  await expect(boardArrow).toHaveCount(0);
+
+  await connectCards(page, a.id, b.id);
+  await form.getByLabel("Название цепочки").fill("Учебные материалы");
+  const create = form.getByRole("button", {
+    name: "Создать цепочку в Singularity",
+    exact: true,
+  });
+  await expect(create).toBeDisabled();
+  await form.getByRole("button", { name: "Выбрать тег цепочек" }).click();
+  const settings = page.getByRole("dialog", { name: "Настройки доски" });
+  await settings.getByLabel("Тег цепочек").selectOption("A-chain");
+  await settings.getByRole("button", { name: "Сохранить настройки" }).click();
+  await expect(settings.getByRole("status")).toHaveText("Настройки сохранены");
+  await settings.getByRole("button", { name: "Закрыть настройки" }).click();
+  await create.click();
+  const firstArrow = page.getByLabel(`${first} → ${second}`, { exact: true });
+  await expect(firstArrow).toHaveCount(1);
+
+  await connectCards(page, b.id, c.id);
+  const secondArrow = page.getByLabel(`${second} → ${third}`, { exact: true });
+  await expect(secondArrow).toHaveCount(1);
+  await page.reload();
+  await expect(firstArrow).toHaveCount(1);
+  await expect(secondArrow).toHaveCount(1);
+
+  const board = await (await request.get("/api/board")).json();
+  const chain = board.tasks.find(
+    (task: any) => task.title === "Учебные материалы"
+  );
+  expect(chain).toMatchObject({
+    projectId: "P-demo",
+    group: "Q-study",
+    tags: ["A-chain"],
+  });
+  for (const { id, fields, layout } of [a, b, c]) {
+    expect(board.tasks.find((task: any) => task.id === id)).toMatchObject({
+      ...fields,
+      parent: chain.id,
+    });
+    expect(board.layouts[id]).toMatchObject(layout);
+  }
+});
+
+test("две задачи без проекта соединяются на доске и новый шаг создаётся в цепочке", async ({
+  page,
+  request,
+}) => {
+  const titles = ["Забрать инструмент", "Найти сервис"];
+  const ids = await Promise.all(
+    titles.map(async (title, index) => {
+      const response = await request.post("/api/demo/external/tasks", {
+        data: { title, projectId: "" },
+      });
+      expect(response.ok()).toBe(true);
+      const { id } = await response.json();
+      await request.put(`/api/layouts/${id}`, {
+        data: { x: 200 + 330 * index, y: 476, width: 250, height: 100 },
+      });
+      return id as string;
+    })
+  );
+  await request.patch("/api/settings", {
+    data: { viewport: { x: 130, y: 140, zoom: 0.75 } },
+  });
+  const readBoard = async () => (await request.get("/api/board")).json();
+  await expect
+    .poll(async () => {
+      await request.post("/api/sync", { data: {} });
+      const board = await readBoard();
+      return ids.every((id) => board.tasks.some((task: any) => task.id === id));
+    })
+    .toBe(true);
+  const before = await readBoard();
+
+  await page.goto("/");
+  await connectCards(page, ids[0], ids[1]);
+  const arrow = page.getByLabel(`${titles.join(" → ")} (на доске)`, {
+    exact: true,
+  });
+  await expect(arrow).toHaveCount(1);
+  await expect(page.getByRole("region", { name: "Новая цепочка" })).toHaveCount(0);
+  const board = await readBoard();
+  expect(board.operations.map((operation: any) => operation.id)).toEqual(
+    before.operations.map((operation: any) => operation.id)
+  );
+  expect(board.taskLinks).toContainEqual({ source: ids[0], target: ids[1] });
+  await page.reload();
+  await expect(arrow).toHaveCount(1);
+
+  const chainTitle = "Ремонт инструмента";
+  const stepTitle = "Отвезти инструмент";
+  const response = await request.post("/api/chains", { data: { title: chainTitle } });
+  expect(response.ok()).toBe(true);
+  const chainId = await resultId(request, (await response.json()).operationId);
+  await page
+    .getByRole("region", { name: "Цепочки задач" })
+    .getByRole("button", { name: new RegExp(`^${chainTitle}`) })
+    .click();
+  const panel = page.getByRole("region", { name: "Шаги цепочки" });
+  await expect(panel.getByLabel("Добавить шаг")).toHaveCount(0);
+  await panel.getByLabel("Название шага").fill(stepTitle);
+  await panel.getByRole("button", { name: "Добавить шаг" }).click();
+  await expect(panel.getByRole("button", { name: new RegExp(`^${stepTitle}`) })).toBeVisible();
+  const saved = await readBoard();
+  const step = saved.tasks.find((task: any) => task.title === stepTitle);
+  expect(step.parent).toBe(chainId);
+
+  await request.put(`/api/layouts/${step.id}`, {
+    data: { x: 860, y: 476, width: 250, height: 100 },
+  });
+  await panel.getByLabel("Свернуть панель цепочки").click();
+  await connectCards(page, ids[1], step.id);
+  await expect(page.getByLabel(`${titles[1]} → ${stepTitle} (на доске)`, { exact: true })).toHaveCount(1);
 });

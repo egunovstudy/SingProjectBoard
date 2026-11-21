@@ -17,7 +17,15 @@ import ReactFlow, {
   ReactFlowProvider,
   applyNodeChanges,
 } from "reactflow";
-import { api, Board, Layout, Settings, Scenario, Task } from "./types";
+import {
+  api,
+  taskLinkPath,
+  Board,
+  Layout,
+  Settings,
+  Scenario,
+  Task,
+} from "./types";
 import { icon } from "./ui";
 import { nodeTypes } from "./BoardNodes";
 import {
@@ -31,7 +39,13 @@ import {
   scenarioNodeIds,
   scenarioTree,
 } from "./scenarios";
-import { taskChains } from "./chains";
+import {
+  canLinkChainStep,
+  canPositionStep,
+  moveChainStep,
+  sameTaskLocation,
+  taskChains,
+} from "./chains";
 import { ChainPanel, CreateChainPanel } from "./ChainPanel";
 import ScenarioParentPanel from "./ScenarioParentPanel";
 import TaskEditor from "./TaskEditor";
@@ -82,6 +96,8 @@ function Workspace() {
   const [onlyProject, setOnlyProject] = useState(false);
   const [scenariosOnly, setScenariosOnly] = useState(false);
   const [chainId, setChainId] = useState("");
+  const [initialChainSteps, setInitialChainSteps] =
+    useState<readonly [string, string]>();
   const [relationPanel, setRelationPanel] = useState<
     "new-chain" | "chain" | "scenario" | null
   >(null);
@@ -532,11 +548,13 @@ function Workspace() {
     setSelected("");
     setEdgeId("");
   }, []);
-  function startChain() {
-    if (!chainMarker) {
+  function startChain(steps?: readonly [string, string]) {
+    if (!chainMarker && !steps) {
       setSettingsOpen("chains");
       return;
     }
+    setError("");
+    setInitialChainSteps(steps);
     setChainId("");
     setTrayMode(null);
     setSelected("");
@@ -647,6 +665,7 @@ function Workspace() {
           color: taskProjects[0]?.color || "#bdc4c9",
           projectNames: taskProjects.map((p) => p.title),
           nextStep: task.id === nextStepId,
+          chainConnectable: canLinkChainStep(task, chainMarker?.id || ""),
           save: saveLayout,
           complete,
         },
@@ -703,6 +722,7 @@ function Workspace() {
     flow,
     project,
     nextStepId,
+    chainMarker,
     visible,
     scenariosOnly,
     filtered,
@@ -767,12 +787,12 @@ function Workspace() {
         strokeDasharray: "6 4",
       },
     }));
-  const visibleTaskIds = new Set(visible.map((t) => t.id));
+  const visibleTasksById = new Map(visible.map((task) => [task.id, task]));
   const chainEdges: Edge[] = chains.flatMap(({ parent, steps }) => {
     const focused = chainId === parent.id;
     return steps.slice(1).flatMap((step, index) => {
       const previous = steps[index];
-      if (!visibleTaskIds.has(previous.id) || !visibleTaskIds.has(step.id))
+      if (!visibleTasksById.has(previous.id) || !visibleTasksById.has(step.id))
         return [];
       return [
         {
@@ -795,7 +815,44 @@ function Workspace() {
       ];
     });
   });
-  const boardEdges = [...motivationEdges, ...treeEdges, ...chainEdges];
+  const taskLinkEdges: Edge[] = (board?.taskLinks || []).flatMap(
+    ({ source, target }) => {
+      const before = visibleTasksById.get(source);
+      const after = visibleTasksById.get(target);
+      if (
+        !before ||
+        !after ||
+        chainEdges.some(
+          (edge) => edge.source === source && edge.target === target
+        )
+      )
+        return [];
+      return [
+        {
+          id: `board-link:${source}:${target}`,
+          source,
+          target,
+          sourceHandle: "task",
+          targetHandle: "chain-step",
+          type: "smoothstep",
+          data: { kind: "task-link" },
+          markerEnd: "chain-arrow",
+          ariaLabel: `${before.title} → ${after.title} (на доске)`,
+          style: {
+            stroke: "#386fc3",
+            strokeWidth: 2.2,
+            strokeDasharray: "6 4",
+          },
+        },
+      ];
+    }
+  );
+  const boardEdges = [
+    ...motivationEdges,
+    ...treeEdges,
+    ...chainEdges,
+    ...taskLinkEdges,
+  ];
   const edge = boardEdges.find((candidate) => candidate.id === edgeId);
   const edgeSource = edge?.source;
   const edgeTarget = edge?.target;
@@ -842,14 +899,82 @@ function Workspace() {
   useEffect(() => {
     if (!edge && edgeId) setEdgeId("");
   }, [edge, edgeId]);
+  function validConnection(c: Connection | Edge) {
+    if (offline || c.sourceHandle !== "task" || c.source === c.target)
+      return false;
+    const source = visible.find((task) => task.id === c.source);
+    if (!source?.canEditScenarios) return false;
+    if (c.targetHandle === "project") return projectMap.has(c.target || "");
+    const target = visible.find((task) => task.id === c.target);
+    const marker = chainMarker?.id || "";
+    return (
+      c.targetHandle === "chain-step" &&
+      !!target &&
+      canLinkChainStep(source, marker) &&
+      canLinkChainStep(target, marker)
+    );
+  }
   async function connect(c: Connection) {
-    if (c.source && c.target)
+    if (!c.source || !c.target) return;
+    if (c.targetHandle === "project") {
       await act(() =>
         api(`/tasks/${encodeURIComponent(c.source!)}/tags`, "POST", {
           tagId: c.target,
           add: true,
         })
       );
+      return;
+    }
+    const source = visible.find((task) => task.id === c.source);
+    const target = visible.find((task) => task.id === c.target);
+    if (!source || !target) return;
+    if (
+      !source.projectId &&
+      !target.projectId &&
+      (!source.parent || !target.parent)
+    ) {
+      await act(() => api(taskLinkPath(source.id, target.id), "PUT"));
+      return;
+    }
+    const sourceChain = chains.find(
+      ({ parent }) => parent.id === source.parent
+    );
+    const targetChain = chains.find(
+      ({ parent }) => parent.id === target.parent
+    );
+    if ((source.parent && !sourceChain) || (target.parent && !targetChain)) {
+      if (chainMarker)
+        setError(
+          "Одна из задач уже является подзадачей вне цепочки. Её вложенность можно изменить в Singularity."
+        );
+      else setSettingsOpen("chains");
+      return;
+    }
+    const chain = sourceChain ?? targetChain;
+    if (!chain) {
+      if (sameTaskLocation(source, target)) {
+        startChain([source.id, target.id]);
+      } else {
+        setError(
+          "Для цепочки выберите задачи из одного проекта и раздела Singularity."
+        );
+      }
+      return;
+    }
+    const step = sourceChain ? target : source;
+    if (!canPositionStep(step, chain, chainMarker?.id || "")) {
+      setError(
+        step.parent
+          ? "У шага уже есть другая цепочка. Выберите шаги одной цепочки."
+          : "Задача и цепочка должны быть в одном проекте и разделе Singularity."
+      );
+      return;
+    }
+    const afterId = sourceChain
+      ? source.id
+      : chain.steps[chain.steps.findIndex((step) => step.id === target.id) - 1]
+          ?.id || "";
+    await act(() => moveChainStep(chain.parent.id, step, afterId));
   }
   async function createTask(
     title: string,
@@ -1028,7 +1153,7 @@ function Workspace() {
               <b>{steps.length}</b>
             </button>
           ))}
-          <button className="side-item" onClick={startChain}>
+          <button className="side-item" onClick={() => startChain()}>
             {icon("plus", 16)}{" "}
             <span>{chainMarker ? "Создать цепочку" : "Настроить цепочки"}</span>
           </button>
@@ -1394,9 +1519,14 @@ function Workspace() {
               }}
             />
           )}
-          {relationPanel === "new-chain" && chainMarker && (
+          {relationPanel === "new-chain" && (
             <CreateChainPanel
+              key={JSON.stringify(initialChainSteps) || "new-chain"}
               board={board}
+              stepIds={initialChainSteps}
+              configureMarker={
+                chainMarker ? undefined : () => setSettingsOpen("chains")
+              }
               close={() => setRelationPanel(null)}
               created={openChain}
               refresh={refresh}
@@ -1412,6 +1542,19 @@ function Workspace() {
               tasks={views}
               close={() => setRelationPanel(null)}
               select={selectTask}
+              openOperations={() => setOperationsOpen(true)}
+              linkOnBoard={(operationId) =>
+                void act(async () => {
+                  await api(
+                    `/operations/${encodeURIComponent(operationId)}`,
+                    "POST",
+                    {
+                      action: "link-on-board",
+                    }
+                  );
+                  setRelationPanel(null);
+                })
+              }
               showOnBoard={(task) => {
                 if (!task.layout.hidden && isPlaced(task.layout))
                   jumpToTask(task);
@@ -1562,10 +1705,7 @@ function Workspace() {
                 void act(() => createTask(title, scenario?.id, pos));
               }}
               onConnect={(c) => void connect(c)}
-              isValidConnection={(c) =>
-                projectMap.has(c.target || "") &&
-                visible.some((t) => t.id === c.source && t.canEditScenarios)
-              }
+              isValidConnection={validConnection}
               onMoveEnd={(_, viewport) => {
                 viewportDraft.current = viewport;
                 clearTimeout(viewportTimer.current);
@@ -1627,6 +1767,8 @@ function Workspace() {
               <span>
                 {edge.data?.kind === "chain"
                   ? "Порядок шагов"
+                  : edge.data?.kind === "task-link"
+                  ? "Связь на доске"
                   : edge.data?.kind === "tree"
                   ? "Связь сценариев"
                   : "Связь задачи со сценарием"}
@@ -1643,6 +1785,7 @@ function Workspace() {
                   className="danger-text"
                   disabled={
                     edge.data?.kind !== "tree" &&
+                    edge.data?.kind !== "task-link" &&
                     !visible.some(
                       (t) => t.id === edge.source && t.canEditScenarios
                     )
@@ -1654,6 +1797,11 @@ function Workspace() {
                           `/tags/${encodeURIComponent(edge.source)}/parent`,
                           "PATCH",
                           { parentId: "", base: edge.target }
+                        );
+                      } else if (edge.data?.kind === "task-link") {
+                        await api(
+                          taskLinkPath(edge.source, edge.target),
+                          "DELETE"
                         );
                       } else {
                         await api(

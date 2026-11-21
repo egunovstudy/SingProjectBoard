@@ -55,6 +55,20 @@ class RealTransportTest {
         });
         gateway(client).deleteTask("T-a");
     }
+
+    @Test
+    void identifiesTheFailedRequestWithoutDisplayingTheRemoteErrorBody() {
+        var client = new HttpClientStub(req -> HttpClientStub.response(req, 404,
+                "{\"message\":\"Project not found: private title\"}", Map.of()));
+        assertThatThrownBy(() -> gateway(client).patchTask("T-step", Json.object().put("parent", "T-chain")))
+                .isInstanceOfSatisfying(ApiFailure.class, error -> {
+                    assertThat(error.status).isEqualTo(404);
+                    assertThat(error.retryable).isFalse();
+                    assertThat(error.getMessage()).contains("PATCH /v2/task/T-step", "Проект не найден")
+                            .doesNotContain("private title", "test-only-token");
+                });
+    }
+
     @Test void boundsPaginationAndRejectsRepeatedIds() {
         var client=new HttpClientStub(req->HttpClientStub.response(req,200,"{\"tags\":[{\"id\":\"A-a\"},{\"id\":\"A-a\"}],\"pagination\":{\"count\":2,\"offset\":0,\"total\":2}}",Map.of()));
         assertThatThrownBy(()->gateway(client).tags()).isInstanceOf(ApiFailure.class).hasMessageContaining("Список изменился");

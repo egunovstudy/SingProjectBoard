@@ -6,4 +6,7 @@
   <changeSet id="002-operation-order" author="singboard">
     <sqlFile path="002-operation-order.sql" relativeToChangelogFile="true"/>
   </changeSet>
+  <changeSet id="003-task-links" author="singboard">
+    <sqlFile path="003-task-links.sql" relativeToChangelogFile="true"/>
+  </changeSet>
 </databaseChangeLog>

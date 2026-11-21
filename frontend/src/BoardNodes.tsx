@@ -13,7 +13,7 @@ import { readOnly, recurring } from "./types";
 import type { BoardTask } from "./boardModel";
 import { icon } from "./ui";
 import { scenarioStyle, scenarioType } from "./scenarios";
-function TaskCard({ data, selected }: NodeProps) {
+function TaskCard({ data, selected, isConnectable }: NodeProps) {
   const task: BoardTask = data.task;
   return (
     <div
@@ -74,15 +74,27 @@ function TaskCard({ data, selected }: NodeProps) {
         type="source"
         position={Position.Right}
         id="task"
-        aria-label="Связать задачу со сценарием"
-        isConnectable={task.canEditScenarios}
+        aria-label={
+          data.chainConnectable
+            ? "Соединить с задачей или сценарием"
+            : "Связать задачу со сценарием"
+        }
+        title={
+          data.chainConnectable
+            ? "Потяните к следующей задаче или сценарию"
+            : "Потяните к сценарию"
+        }
+        isConnectable={isConnectable && task.canEditScenarios}
       />
       <Handle
         type="target"
         position={Position.Left}
         id="chain-step"
-        className="relation-anchor"
-        isConnectable={false}
+        className={data.chainConnectable ? "chain-handle" : "relation-anchor"}
+        aria-label="Соединить с предыдущей задачей"
+        title="Сюда ведёт стрелка от предыдущей задачи"
+        isConnectable={isConnectable && data.chainConnectable}
+        isConnectableStart={false}
       />
     </div>
   );

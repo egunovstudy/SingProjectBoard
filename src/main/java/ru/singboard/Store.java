@@ -1,6 +1,7 @@
 package ru.singboard;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -124,6 +125,28 @@ public class Store {
                 jdbc.update("INSERT INTO board_layout(mode,id,payload) VALUES (?,?,?)", mode, id, value.toString());
         });
     }
+
+    ArrayNode taskLinks() {
+        ArrayNode links = Json.array();
+        jdbc.query("SELECT source_id,target_id FROM board_task_link WHERE mode=? ORDER BY source_id,target_id", rs -> {
+            links.addObject().put("source", rs.getString(1)).put("target", rs.getString(2));
+        }, mode);
+        return links;
+    }
+
+    void linkTasks(String source, String target) {
+        jdbc.update("INSERT INTO board_task_link(mode,source_id,target_id) VALUES (?,?,?) ON CONFLICT DO NOTHING",
+                mode, source, target);
+    }
+
+    void unlinkTasks(String source, String target) {
+        jdbc.update("DELETE FROM board_task_link WHERE mode=? AND source_id=? AND target_id=?", mode, source, target);
+    }
+
+    void removeTaskLinks(String taskId) {
+        jdbc.update("DELETE FROM board_task_link WHERE mode=? AND (source_id=? OR target_id=?)", mode, taskId, taskId);
+    }
+
     public String enqueue(String kind, String entityId, JsonNode payload) {
         return enqueue(UUID.randomUUID().toString(), kind, entityId, payload);
     }

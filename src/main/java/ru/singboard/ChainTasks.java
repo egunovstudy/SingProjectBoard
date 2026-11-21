@@ -68,6 +68,8 @@ final class ChainTasks {
             throw new IllegalArgumentException("У задачи уже есть родитель. Измените её вложенность в Singularity");
         if (parent.isBlank() && !sameLocation(chain, step))
             throw new IllegalArgumentException("Задача и цепочка должны быть в одном проекте и разделе Singularity");
+        if (parent.isBlank() && !Json.hasText(chain, "projectId"))
+            throw new IllegalArgumentException("Готовую задачу без проекта можно связать стрелкой на доске. В цепочке можно создать новый шаг");
     }
 
     List<JsonNode> steps(String chainId) {
@@ -115,7 +117,13 @@ final class ChainTasks {
             throw new ApiFailure(0, false, "Singularity вернул другой порядок или расположение шага. Сверьте цепочку");
     }
 
-    private static boolean sameLocation(JsonNode a, JsonNode b) {
+    static void copyLocation(JsonNode from, ObjectNode to) {
+        for (String key : List.of("projectId", "group")) {
+            if (Json.hasText(from, key)) to.set(key, from.path(key));
+        }
+    }
+
+    static boolean sameLocation(JsonNode a, JsonNode b) {
         return BoardService.equivalent(a.path("projectId"), b.path("projectId"))
                 && BoardService.equivalent(a.path("group"), b.path("group"));
     }

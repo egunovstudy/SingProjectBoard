@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 
 @Component
 @ConditionalOnProperty(name = "app.mode", havingValue = "real")
@@ -62,6 +63,7 @@ public class RealSingularityGateway implements SingularityGateway {
                 if (code == 429) blockedUntil = System.currentTimeMillis() + delay;
                 throw new ApiFailure(code, code == 429 || code >= 500, switch (code) {
                     case 401, 403 -> "Singularity: доступ запрещён (" + code + "). Проверьте токен и тариф";
+                    case 404 -> notFoundMessage(method, path, response.body());
                     case 429 -> "Singularity: ограничение частоты запросов";
                     default -> "Singularity: HTTP " + code;
                 }, delay);
@@ -74,6 +76,23 @@ public class RealSingularityGateway implements SingularityGateway {
             throw new ApiFailure(0, true, "Запрос прерван; результат требует проверки");
         }
     }
+
+    private static String notFoundMessage(String method, String path, String body) {
+        String message = "Singularity: HTTP 404 (" + method + " " + URI.create(path).getRawPath() + ")";
+        try {
+            String reason = Json.text(Json.read(body), "message").toLowerCase(Locale.ROOT);
+            if (reason.contains("not found") || reason.contains("does not exist") || reason.contains("не найден")) {
+                if (reason.contains("project") || reason.contains("проект")) return message + ". Проект не найден";
+                if (reason.contains("group") || reason.contains("секци")) return message + ". Раздел не найден";
+                if (reason.contains("parent") || reason.contains("родитель")) return message + ". Родительская задача не найдена";
+                if (reason.contains("task") || reason.contains("задач")) return message + ". Задача не найдена";
+            }
+        } catch (IllegalArgumentException ignored) {
+            // A proxy can return a non-JSON response. Keep the status and request path.
+        }
+        return message;
+    }
+
     List<JsonNode> list(String resource, String key, String query) {
         List<JsonNode> result = new ArrayList<>();
         HashSet<String> ids = new HashSet<>();
