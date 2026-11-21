@@ -434,7 +434,7 @@ function Workspace() {
   );
   const chains = useMemo(
     () =>
-      taskChains(views, chainMarker?.id || "").filter(
+      taskChains(views, chainMarker?.id || "", board?.taskLinks).filter(
         ({ parent }) =>
           !board?.settings.projectIds.length ||
           board.settings.projectIds.includes(parent.projectId || "")
@@ -443,11 +443,13 @@ function Workspace() {
   );
   const activeChain = chains.find(({ parent }) => parent.id === chainId);
   const focusedSteps = useMemo(
-    () => new Set(activeChain?.steps.map((step) => step.id)),
+    () => new Set(activeChain?.displaySteps.map((step) => step.id)),
     [activeChain]
   );
   const groupNodes = activeChain ? focusedSteps : scenarioNodes;
-  const nextStepId = activeChain?.steps.find((step) => !step.checked)?.id;
+  const nextStepId = activeChain?.displaySteps.find(
+    (step) => !step.checked
+  )?.id;
   useEffect(() => {
     if (project && !activeScenario) {
       setProject("");
@@ -788,6 +790,9 @@ function Workspace() {
       },
     }));
   const visibleTasksById = new Map(visible.map((task) => [task.id, task]));
+  const stepNumbers = new Map(
+    activeChain?.displaySteps.map((step, index) => [step.id, index + 1])
+  );
   const chainEdges: Edge[] = chains.flatMap(({ parent, steps }) => {
     const focused = chainId === parent.id;
     return steps.slice(1).flatMap((step, index) => {
@@ -804,7 +809,7 @@ function Workspace() {
           type: "smoothstep",
           data: { kind: "chain", chainId: parent.id },
           markerEnd: "chain-arrow",
-          label: focused ? index + 2 : undefined,
+          label: focused ? stepNumbers.get(step.id) : undefined,
           labelStyle: { fill: "#285eab", fontWeight: 700 },
           ariaLabel: `${previous.title} → ${step.title}`,
           style: {
@@ -1141,7 +1146,7 @@ function Workspace() {
         </button>
         <section className="side-section chain-nav" aria-label="Цепочки задач">
           <div className="side-heading">ЦЕПОЧКИ</div>
-          {chains.map(({ parent, steps }) => (
+          {chains.map(({ parent, displaySteps }) => (
             <button
               key={parent.id}
               className={`side-item ${chainId === parent.id ? "active" : ""}`}
@@ -1150,7 +1155,7 @@ function Workspace() {
             >
               {icon("link", 16)}
               <span>{parent.title}</span>
-              <b>{steps.length}</b>
+              <b>{displaySteps.length}</b>
             </button>
           ))}
           <button className="side-item" onClick={() => startChain()}>

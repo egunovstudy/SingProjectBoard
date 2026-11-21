@@ -1686,6 +1686,10 @@ input[type="checkbox"] {
   gap: 10px;
   overflow-y: auto;
 }
+.chain-panel {
+  top: 46px;
+  max-height: calc(100% - 144px);
+}
 .relations-panel .tray-header {
   flex-shrink: 0;
 }

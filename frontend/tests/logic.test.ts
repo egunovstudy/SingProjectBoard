@@ -264,3 +264,45 @@ test('only marked parents produce chains, including completed and unplaced steps
   const afterExternalMove = presentTasks(raw.map((task)=>task.id===last.id?{...task,parentOrder:0}:task),{});
   assert.deepEqual(taskChains(afterExternalMove,'marker')[0].steps.map((step)=>step.id),[last.id,first.id]);
 });
+
+test('linked prerequisites and successors appear as chain steps without changing native membership', () => {
+  const views = presentTasks([
+    { id: 'chain', title: 'Ремонт инструмента', tags: ['marker'] },
+    { id: 'deliver', title: 'Отвезти инструмент', parent: 'chain' },
+    { id: 'pick-up', title: 'Забрать инструмент' },
+    { id: 'find-service', title: 'Найти сервис', checked: 1 },
+    { id: 'test', title: 'Проверить инструмент' },
+    { id: 'removed', title: 'Устаревшая задача', missing: true },
+    { id: 'unrelated', title: 'Посторонняя задача' },
+  ], {});
+  const [chain] = taskChains(views, 'marker', [
+    { source: 'find-service', target: 'deliver' },
+    { source: 'pick-up', target: 'deliver' },
+    { source: 'deliver', target: 'test' },
+    { source: 'removed', target: 'deliver' },
+    { source: 'unrelated', target: 'removed' },
+  ]);
+  assert.deepEqual(chain.steps.map(({ id }) => id), ['deliver']);
+  assert.deepEqual(chain.displaySteps.map(({ id }) => id), [
+    'pick-up', 'find-service', 'deliver', 'test',
+  ]);
+});
+
+test('cyclic board links preserve native order and do not merge other chains', () => {
+  const views = presentTasks([
+    { id: 'chain', title: 'Гитара', tags: ['marker'] },
+    { id: 'first', title: 'Разметить', parent: 'chain', parentOrder: 1 },
+    { id: 'second', title: 'Закрепить', parent: 'chain', parentOrder: 2 },
+    { id: 'linked', title: 'Позвать помощника' },
+    { id: 'other-chain', title: 'Полка', tags: ['marker'] },
+    { id: 'other-step', title: 'Выбрать доску', parent: 'other-chain' },
+  ], {});
+  const [chain, other] = taskChains(views, 'marker', [
+    { source: 'first', target: 'second' },
+    { source: 'second', target: 'linked' },
+    { source: 'linked', target: 'first' },
+    { source: 'second', target: 'other-step' },
+  ]);
+  assert.deepEqual(chain.displaySteps.map(({ id }) => id), ['first', 'second', 'linked']);
+  assert.deepEqual(other.displaySteps.map(({ id }) => id), ['other-step']);
+});

@@ -242,10 +242,13 @@ export function ChainPanel({
   const afterId = anchor ?? defaultAnchor;
   const missingAnchor =
     !!afterId && !chain.steps.some((step) => step.id === afterId);
-  const next = chain.steps.find((step) => !step.checked);
-  const unplaced = chain.steps.filter(
+  const next = chain.displaySteps.find((step) => !step.checked);
+  const unplaced = chain.displaySteps.filter(
     (step) => !step.layout.hidden && !isPlaced(step.layout)
   ).length;
+  const stepPositions = new Map(
+    chain.steps.map((step, index) => [step.id, index])
+  );
   const stepsPath = `/chains/${encodeURIComponent(chain.parent.id)}/steps`;
 
   async function enqueue(action: () => Promise<{ operationId: string }>) {
@@ -304,13 +307,13 @@ export function ChainPanel({
         <p className="chain-unplaced">В «Неразобранном» — {unplaced}</p>
       )}
       <ol className="chain-steps">
-        {chain.steps.map((step, index) => {
-          const editable = canPositionStep(
-            step,
-            chain,
-            board.settings.chainTagId
-          );
+        {chain.displaySteps.map((step, index) => {
+          const positionIndex = stepPositions.get(step.id) ?? -1;
+          const editable =
+            positionIndex >= 0 &&
+            canPositionStep(step, chain, board.settings.chainTagId);
           const details = [
+            positionIndex < 0 ? "Связана на доске" : "",
             step.checked
               ? "Завершена"
               : step.id === next?.id
@@ -342,11 +345,11 @@ export function ChainPanel({
                   <button
                     type="button"
                     className="tiny"
-                    disabled={locked || index === 0}
+                    disabled={locked || positionIndex === 0}
                     aria-label={`На шаг выше — ${step.title}`}
                     onClick={() =>
                       void enqueue(() =>
-                        position(step, chain.steps[index - 2]?.id || "")
+                        position(step, chain.steps[positionIndex - 2]?.id || "")
                       )
                     }
                   >
@@ -355,11 +358,13 @@ export function ChainPanel({
                   <button
                     type="button"
                     className="tiny"
-                    disabled={locked || index === chain.steps.length - 1}
+                    disabled={
+                      locked || positionIndex === chain.steps.length - 1
+                    }
                     aria-label={`На шаг ниже — ${step.title}`}
                     onClick={() =>
                       void enqueue(() =>
-                        position(step, chain.steps[index + 1].id)
+                        position(step, chain.steps[positionIndex + 1].id)
                       )
                     }
                   >
@@ -379,7 +384,7 @@ export function ChainPanel({
           );
         })}
       </ol>
-      {chain.steps.length === 0 && <p>Добавьте первый шаг.</p>}
+      {chain.displaySteps.length === 0 && <p>Добавьте первый шаг.</p>}
       <form className="relations-form" onSubmit={submit}>
         {hasProject && (
           <label>

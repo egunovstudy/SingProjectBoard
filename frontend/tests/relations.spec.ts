@@ -360,10 +360,10 @@ test("две задачи без проекта соединяются на до
   const response = await request.post("/api/chains", { data: { title: chainTitle } });
   expect(response.ok()).toBe(true);
   const chainId = await resultId(request, (await response.json()).operationId);
-  await page
+  const chainButton = page
     .getByRole("region", { name: "Цепочки задач" })
-    .getByRole("button", { name: new RegExp(`^${chainTitle}`) })
-    .click();
+    .getByRole("button", { name: new RegExp(`^${chainTitle}`) });
+  await chainButton.click();
   const panel = page.getByRole("region", { name: "Шаги цепочки" });
   await expect(panel.getByLabel("Добавить шаг")).toHaveCount(0);
   await panel.getByLabel("Название шага").fill(stepTitle);
@@ -378,5 +378,32 @@ test("две задачи без проекта соединяются на до
   });
   await panel.getByLabel("Свернуть панель цепочки").click();
   await connectCards(page, ids[1], step.id);
-  await expect(page.getByLabel(`${titles[1]} → ${stepTitle} (на доске)`, { exact: true })).toHaveCount(1);
+  const chainArrow = page.getByLabel(`${titles[1]} → ${stepTitle} (на доске)`, {
+    exact: true,
+  });
+  await expect(chainArrow).toHaveCount(1);
+  await expect(chainButton.locator("b")).toHaveText("3");
+  await chainButton.click();
+  const rows = panel.locator("ol .tray-task-title");
+  await expect(rows).toHaveText(
+    [...titles, stepTitle].map((title) => new RegExp(`^${title}`))
+  );
+  for (const id of [...ids, step.id]) {
+    await expect(page.getByTestId(`task-${id}`).locator("..")).not.toHaveClass(/dimmed/);
+  }
+  await expect(rows.first().getByText(/Следующий шаг/)).toBeVisible();
+  await expect(panel.getByLabel("Вставить шаг после").locator("option")).toHaveText([
+    "В начало",
+    stepTitle,
+  ]);
+
+  await page.reload();
+  await expect(chainButton.locator("b")).toHaveText("3");
+  await chainButton.click();
+  await expect(rows).toHaveCount(3);
+  await chainArrow.dispatchEvent("click");
+  await page.getByRole("button", { name: "Убрать связь" }).click();
+  await expect(chainButton.locator("b")).toHaveText("1");
+  await expect(rows).toHaveText([new RegExp(`^${stepTitle}`)]);
+  await expect(arrow).toHaveCount(1);
 });
